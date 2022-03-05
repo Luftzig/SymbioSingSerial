@@ -136,7 +136,7 @@ bool parse_command(const char *data) {
     } else if (command.startsWith("state?")) {
         Serial.println(flow_io.getHardwareState(), BIN);
         return true;
-    } else if (command[0] == '!') {
+    }  else if (command[0] == '!') {
         return parse_stop_command(command.substring(1));
     } else if (command[0] == '+') {
         return parse_inflate_command(command.substring(1));
@@ -201,5 +201,6 @@ void loop() {
             std::fill_n(command_buffer, COMMAND_BUFFER_LENGTH, '\0');
         }
     }
+    flow_io.optimizePower(150, 200);
 }
 
