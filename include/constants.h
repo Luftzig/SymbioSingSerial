@@ -1,0 +1,10 @@
+//
+// Created by Yoav Luft on 2022-03-06.
+//
+
+#ifndef SYMBIOSINGDEVICE_CONSTANTS_H
+#define SYMBIOSINGDEVICE_CONSTANTS_H
+
+//#define DEVICE_NAME ""
+
+#endif //SYMBIOSINGDEVICE_CONSTANTS_H
