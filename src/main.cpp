@@ -28,7 +28,7 @@ struct Instruction {
 Instruction STOP_ALL{'!', 0, 0b00011111};
 
 void setup() {
-    Serial.begin(115200);
+    Serial.begin(230400);
     flow_io = FlowIO(INFLATION_SERIES);
 }
 
@@ -189,10 +189,13 @@ void loop() {
             bool succeeded = parse_command(command_buffer);
 
             if (succeeded) {
-                Serial.println("ok");
+                Serial.print("ok");
                 if (nextInstruction.has_value()) {
                     flow_io.command(nextInstruction->command, nextInstruction->ports, nextInstruction->pwm);
+                    Serial.print(", ");
+                    Serial.print(flow_io.getHardwareState(), BIN);
                 }
+                Serial.println();
             } else {
                 Serial.println("error: Failed to parse");
             }
