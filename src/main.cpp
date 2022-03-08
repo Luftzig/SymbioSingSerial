@@ -1,23 +1,30 @@
 #include "constants.h"
+#include "etl/algorithm.h"
 #include <Arduino.h>
 #include <FlowIO_2022.1.24/FlowIO.h>
 #include <etl/optional.h>
+#include <etl/container.h>
 #include <cstdlib>
 
 
 #ifndef DEVICE_NAME
 #define DEVICE_NAME "FlowIO_Serial"
 #endif // DEVICE_NAME
+#pragma message DEVICE_NAME
 
 #ifndef DEBUG
-#define DEBUG true
+#define DEBUG false
 #endif // DEBUG
+
+#ifndef SHOULD_ACK
+#define SHOULD_ACK false
+#endif // SHOULD_ACK
 
 using etl::optional;
 
 FlowIO flow_io;
 
-constexpr size_t COMMAND_BUFFER_LENGTH = 64;
+constexpr size_t COMMAND_BUFFER_LENGTH = 128;
 char command_buffer[COMMAND_BUFFER_LENGTH];
 
 struct Instruction {
@@ -70,9 +77,9 @@ bool parse_pwm_port(const String &s, uint8_t *pwm_out, uint8_t *ports_out) {
     *pwm_out = atoi(pwm_str.c_str());
     String ports_str = s.substring(second_comma + 1);
     DEBUG_println("port_str = " + ports_str);
-    unsigned  long ports;
+    unsigned long ports;
     parse_binary(ports_str, &ports);
-    *ports_out = (uint8_t)ports;
+    *ports_out = (uint8_t) ports;
     return true;
 }
 
@@ -124,20 +131,23 @@ bool parse_release_command(const String &s) {
     }
 }
 
-bool parse_command(const char *data) {
+bool parse_command(const String &data) {
     String command{data};
     command.trim();
     if (command.startsWith("!all")) {
         DEBUG_println("STOP ALL");
         nextInstruction = STOP_ALL;
+        Serial.println("ok");
         return true;
     } else if (command.startsWith("name?")) {
         Serial.println(DEVICE_NAME);
+        Serial.println("ok");
         return true;
     } else if (command.startsWith("state?")) {
         Serial.println(flow_io.getHardwareState(), BIN);
+        Serial.println("ok");
         return true;
-    }  else if (command[0] == '!') {
+    } else if (command[0] == '!') {
         return parse_stop_command(command.substring(1));
     } else if (command[0] == '+') {
         return parse_inflate_command(command.substring(1));
@@ -176,34 +186,73 @@ private:
 
 bool green_led_state = false;
 
-run_every blink_led{500, []() {
+run_every blink_led{250, []() {
     flow_io.pixel(0, 5 * green_led_state, 0);
     green_led_state = !green_led_state;
 }};
 
+auto next_buffer_space = etl::begin(command_buffer);
+
+void push_input_to_buffer() {
+    if (size_t to_read = Serial.available()) {
+        auto available = etl::distance(next_buffer_space, etl::end(command_buffer));
+        auto amount_read = Serial.readBytes(next_buffer_space, min(available, to_read));
+        next_buffer_space = next_buffer_space + amount_read;
+    }
+}
+
+optional<String> extract_command() {
+    char *newline_index = etl::find(etl::begin(command_buffer), etl::end(command_buffer), '\n');
+    if (newline_index != etl::end(command_buffer)) {
+//        DEBUG_println("command buffer: " + String((size_t)command_buffer));
+//        DEBUG_println("next buffer space: " + String((size_t)next_buffer_space));
+//        DEBUG_println("newline index: " + String((size_t)newline_index));
+        char bf[COMMAND_BUFFER_LENGTH];
+        auto last = etl::copy(etl::begin(command_buffer), newline_index, etl::begin(bf));
+        *last = '\0';
+        String command(bf);
+        DEBUG_println("read command: " + command);
+
+        // Move the next command to the beginning of the buffer and override the end with null;
+        etl::rotate(command_buffer, newline_index + 1, etl::end(command_buffer));
+        etl::fill(next_buffer_space, etl::end(command_buffer), '\0');
+        next_buffer_space -= (command.length() + 1);
+        DEBUG_println("buffer after rotate" + String(command_buffer));
+        return command;
+    } else {
+        return etl::nullopt;
+    }
+}
+
 void loop() {
     blink_led.update(millis());
-    if (Serial.available()) {
-        size_t num_read = Serial.readBytesUntil('\n', command_buffer, COMMAND_BUFFER_LENGTH);
+    push_input_to_buffer();
+    optional<String> command = extract_command();
+    if (command.has_value()) {
+        bool succeeded = parse_command(command.value());
 
-        if (num_read > 0) {
-            bool succeeded = parse_command(command_buffer);
-
-            if (succeeded) {
+        if (succeeded) {
+            if (SHOULD_ACK) {
                 Serial.print("ok");
-                if (nextInstruction.has_value()) {
-                    flow_io.command(nextInstruction->command, nextInstruction->ports, nextInstruction->pwm);
+            }
+            if (nextInstruction.has_value()) {
+                flow_io.pixel(0, 5 * green_led_state, 5);
+                flow_io.command(nextInstruction->command, nextInstruction->ports, nextInstruction->pwm);
+                flow_io.pixel(0, 5 * green_led_state, 0);
+                if (SHOULD_ACK) {
                     Serial.print(", ");
                     Serial.print(flow_io.getHardwareState(), BIN);
                 }
-                Serial.println();
-            } else {
-                Serial.println("error: Failed to parse");
             }
-
-            nextInstruction = etl::nullopt;
-            std::fill_n(command_buffer, COMMAND_BUFFER_LENGTH, '\0');
+            if (SHOULD_ACK) {
+                Serial.println();
+            }
+        } else {
+            Serial.println("error: Failed to parse");
         }
+
+        nextInstruction = etl::nullopt;
+        command = etl::nullopt;
     }
     flow_io.optimizePower(150, 200);
 }

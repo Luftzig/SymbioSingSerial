@@ -11,7 +11,7 @@ async def cli_only():
     orchestrator.load_file(args.schedule)
     print('Schedule', args.schedule, 'loaded')
     orchestrator.connect_devices()
-    print('Devices are connected. Devices:', ','.join(d.name for d in orchestrator.devices))
+    print('Devices are connected. Devices:\n', '\n'.join('\t'.join((d.name, d.ser.name)) for d in orchestrator.devices))
     print('Device to role mapping is:', orchestrator.device_to_role_mapping)
     await orchestrator.start()
 

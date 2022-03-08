@@ -27,7 +27,7 @@ class Orchestrator:
         ports = get_possible_ports()
         raw_devices = [FlowIO(path) for path in ports]
         connected_devices = [d for d in raw_devices if d.is_connected]
-        print(DEBUG_TAG, "found", len(connected_devices), "devices:", (d.name for d in connected_devices))
+        debug("found", len(connected_devices), "devices:", list(d.name for d in connected_devices))
         self.devices = [d for d in connected_devices if d.is_connected and d.role is not None]
 
     @property
@@ -43,7 +43,7 @@ class Orchestrator:
             print("Missing mappings")
             return
         if len(self.devices) == 0:
-            print("not connected devices")
+            print("No connected FlowIO devices")
             return
         if self.schedule is None or len(self.schedule) == 0:
             print("no schedule is loaded")

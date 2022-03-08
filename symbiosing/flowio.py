@@ -3,7 +3,7 @@ from typing import Literal, Mapping, Union, Optional
 
 import serial
 
-from symbiosing.utils import DEBUG_TAG
+from symbiosing.utils import DEBUG_TAG, debug
 
 ActionReadable = Literal['stop',
                          'inflate',
@@ -73,9 +73,11 @@ class FlowIO:
     def _connect(self, comport_path):
         try:
             self.ser = serial.Serial(comport_path, baudrate=230400, timeout=1)
-            self.ser.write(b'name?')
-            response = self.ser.readline().strip().decode('ascii')
-            print(DEBUG_TAG, "response", response)
+            self.ser.write(b'name?\n')
+            self.ser.flush()
+            response = self.ser.readline()
+            debug("response", response)
+            response = response.strip().decode('ascii')
             if response.startswith('FlowIO_'):
                 (series, role) = _parse_name(response)
                 self.state = Connected(name=response, series=series, role=role, n_timeout=0)
@@ -101,8 +103,10 @@ class FlowIO:
         if self.is_connected:
             try:
                 act = _convert_action(action)
-                self.ser.write(b','.join([act.encode('ascii'), str(pwm).encode('ascii'), _encode_ports(ports)]))
+                self.ser.write(b','.join([act.encode('ascii'), str(pwm).encode('ascii'), _encode_ports(ports)]) + b'\n')
+                # self.ser.flush()
                 # response = self.ser.readline()
+                # debug("command response is:", response)
                 # if not response.startswith(b'ok'):
                 #     # TODO parse the device state
                 #     return False
