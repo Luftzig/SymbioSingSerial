@@ -1,4 +1,5 @@
 import argparse
+import sys
 
 import asyncio
 
@@ -13,6 +14,8 @@ async def cli_only():
     orchestrator.connect_devices()
     print('Devices are connected. Devices:\n', '\n'.join('\t'.join((d.name, d.ser.name)) for d in orchestrator.devices))
     print('Device to role mapping is:', orchestrator.device_to_role_mapping)
+    print('Hit Enter to start, Ctrl+C to abort')
+    input()
     await orchestrator.start()
 
 
