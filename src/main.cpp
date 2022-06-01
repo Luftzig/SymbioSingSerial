@@ -1,11 +1,13 @@
 #include "constants.h"
 #include "etl/algorithm.h"
+#include "Adafruit_ADS1X15.h"
 #include <Arduino.h>
 #include <FlowIO_2022.1.24/FlowIO.h>
 #include <etl/optional.h>
 #include <etl/variant.h>
 #include <etl/container.h>
 #include <cstdlib>
+#include <SPI.h>
 
 
 #ifndef DEVICE_NAME
@@ -43,14 +45,28 @@ struct Instruction {
 };
 
 struct SensorInstruction {
-    uint8_t sensorN;
+    uint8_t sensor_n;
+};
+
+struct SensorWaiting {
+    uint8_t sensor_n;
+    unsigned long start_time;
+};
+
+struct SensorReady {
 };
 
 Instruction STOP_ALL{'!', 0, 0b00011111};
 
+Adafruit_ADS1015 ads;
+
 void setup() {
     Serial.begin(230400);
     flow_io = FlowIO(INFLATION_SERIES);
+    if (!ads.begin()) {
+        Serial.println("Failed to initialise ADS.");
+        flow_io.pixel(1, 0, 0);
+    }
 }
 
 /*
@@ -62,9 +78,10 @@ void setup() {
  *      and p=bbbbb where b=0|1 is port state, from left to right ports 1,2,3,4,5
  */
 
-optional<Instruction> nextInstruction{etl::nullopt};
+optional<Instruction> next_instruction{etl::nullopt};
 
-optional<SensorInstruction> sensor_instruction{etl::nullopt};
+typedef variant<SensorInstruction, SensorWaiting, SensorReady> SensorState;
+SensorState sensor_state{SensorReady{}};
 
 bool is_actuate_inflation() {
     auto config = flow_io.getConfig();
@@ -103,7 +120,7 @@ bool parse_stop_command(const String &s) {
     uint8_t ports;
     DEBUG_println("stop");
     if (parse_pwm_port(s, &pwm, &ports)) {
-        nextInstruction = {'!', pwm, ports};
+        next_instruction = {'!', pwm, ports};
         DEBUG_println(ports);
         return true;
     } else {
@@ -116,7 +133,7 @@ bool parse_inflate_command(const String &s) {
     uint8_t ports;
     DEBUG_println("inflate");
     if (parse_pwm_port(s, &pwm, &ports)) {
-        nextInstruction = {'+', pwm, ports};
+        next_instruction = {'+', pwm, ports};
         DEBUG_println(ports);
         return true;
     } else {
@@ -128,7 +145,7 @@ bool parse_vacuum_command(const String &s) {
     uint8_t pwm;
     uint8_t ports;
     if (parse_pwm_port(s, &pwm, &ports)) {
-        nextInstruction = {'-', pwm, ports};
+        next_instruction = {'-', pwm, ports};
         return true;
     } else {
         return false;
@@ -139,7 +156,7 @@ bool parse_release_command(const String &s) {
     uint8_t pwm;
     uint8_t ports;
     if (parse_pwm_port(s, &pwm, &ports)) {
-        nextInstruction = {'^', pwm, ports};
+        next_instruction = {'^', pwm, ports};
         return true;
     } else {
         return false;
@@ -150,9 +167,7 @@ bool parse_sensor_command(const String &s) {
     uint8_t sensorN;
     sensorN = atoi(s.c_str());
     if (sensorN > 0) {
-        sensor_instruction = {sensorN = (uint8_t) sensorN};
-    } else {
-        sensor_instruction = etl::nullopt;
+        sensor_state = SensorInstruction{sensorN = (uint8_t) sensorN};
     }
     return true;
 }
@@ -162,7 +177,7 @@ bool parse_command(const String &data) {
     command.trim();
     if (command.startsWith("!all")) {
         DEBUG_println("STOP ALL");
-        nextInstruction = STOP_ALL;
+        next_instruction = STOP_ALL;
         Serial.println("ok");
         return true;
     } else if (command.startsWith("name?")) {
@@ -190,7 +205,7 @@ bool parse_command(const String &data) {
     } else if (command[0] == 'r') {
         return parse_sensor_command(command.substring(1));
     } else if (command[0] == 's') {
-        sensor_instruction = etl::nullopt;
+        sensor_state = SensorReady{};
         return true;
     } else {
         return false;
@@ -262,9 +277,9 @@ void handle_command(optional<String> &command) {
         if (SHOULD_ACK) {
             Serial.print("ok");
         }
-        if (nextInstruction.has_value()) {
+        if (next_instruction.has_value()) {
             flow_io.pixel(0, 5 * green_led_state, 5);
-            flow_io.command(nextInstruction->command, nextInstruction->ports, nextInstruction->pwm);
+            flow_io.command(next_instruction->command, next_instruction->ports, next_instruction->pwm);
             flow_io.pixel(0, 5 * green_led_state, 0);
             if (SHOULD_ACK) {
                 Serial.print(", ");
@@ -278,15 +293,16 @@ void handle_command(optional<String> &command) {
         Serial.println("error: Failed to parse");
     }
 
-    nextInstruction = etl::nullopt;
+    next_instruction = etl::nullopt;
     command = etl::nullopt;
 }
 
-run_every sensor_reading{1000l, []() {
-    if (sensor_instruction.has_value()
-        && sensor_instruction->sensorN > 0
-        && sensor_instruction->sensorN <= 16) {
-        uint8_t channel = sensor_instruction->sensorN - 1;
+run_every mux_sensor_reading{1000l, []() {
+    if (sensor_state.is_type<SensorInstruction>()
+        && sensor_state.get<SensorInstruction>().sensor_n > 0
+        && sensor_state.get<SensorInstruction>().sensor_n <= 16) {
+        SensorInstruction instruction = sensor_state.get<SensorInstruction>();
+        uint8_t channel = instruction.sensor_n - 1;
         digitalWrite(SENSOR_ENABLE_PIN, LOW);
         digitalWrite(SENSOR_S0_PIN, bitRead(channel, 0));
         digitalWrite(SENSOR_S1_PIN, bitRead(channel, 1));
@@ -297,12 +313,53 @@ run_every sensor_reading{1000l, []() {
         delayMicroseconds(2);
         uint32_t value = analogRead(SENSOR_OUT_PIN);
         Serial.print("S");
-        Serial.print(sensor_instruction->sensorN);
+        Serial.print(instruction.sensor_n);
         Serial.print(": ");
         Serial.print(value);
         Serial.println();
     } else {
         digitalWrite(SENSOR_ENABLE_PIN, HIGH);
+    }
+}};
+
+run_every ads_reading{1l, []() {
+    if (sensor_state.is_type<SensorWaiting>()) {
+        if (ads.conversionComplete()) {
+            Serial.print("S");
+            auto &sensor_waiting = sensor_state.get<SensorWaiting>();
+            Serial.print(sensor_waiting.sensor_n);
+            Serial.print(" = ");
+            Serial.println(ads.getLastConversionResults());
+            Serial.print("delay: ");
+            Serial.print(millis() - sensor_waiting.start_time);
+            Serial.println("ms");
+            sensor_state = SensorReady();
+        }
+    } else if (sensor_state.is_type<SensorInstruction>()) {
+        SensorInstruction instruction = sensor_state.get<SensorInstruction>();
+        switch (instruction.sensor_n) {
+            case 1:
+                ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_0, false);
+                sensor_state = SensorWaiting{instruction.sensor_n, millis()};
+                break;
+            case 2:
+                ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_1, false);
+                sensor_state = SensorWaiting{instruction.sensor_n, millis()};
+                break;
+            case 3:
+                ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_2, false);
+                sensor_state = SensorWaiting{instruction.sensor_n, millis()};
+                break;
+            case 4:
+                ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_3, false);
+                sensor_state = SensorWaiting{instruction.sensor_n, millis()};
+                break;
+            default:
+                sensor_state = SensorReady();
+                break;
+        }
+    } else if (sensor_state.is_type<SensorReady>()) {
+        // Do nothing
     }
 }};
 
@@ -314,7 +371,8 @@ void loop() {
     if (command.has_value()) {
         handle_command(command);
     }
-    sensor_reading.update(time);
+//    mux_sensor_reading.update(time);
+    ads_reading.update(time);
     flow_io.optimizePower(150, 200);
 }
 
