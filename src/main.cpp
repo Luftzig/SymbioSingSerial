@@ -44,17 +44,28 @@ struct Instruction {
     uint8_t ports;
 };
 
-struct SensorInstruction {
-    uint8_t sensor_n;
-};
+struct SensorReady {
+} sensor_ready;
+
+struct SensorReadingRequest {
+} sensor_reading_request;
 
 struct SensorWaiting {
     uint8_t sensor_n;
-    unsigned long start_time;
+    int16_t previous_readings[4];
 };
 
-struct SensorReady {
+struct SensorReadDone {
+    int16_t values[4];
 };
+
+typedef variant<SensorReady, SensorReadingRequest, SensorWaiting, SensorReadDone> SensorState;
+SensorState sensor_state{SensorReady{}};
+
+enum SensorSampling {
+    Active,
+    Inactive
+} sensor_sampling_mode;
 
 Instruction STOP_ALL{'!', 0, 0b00011111};
 
@@ -79,9 +90,6 @@ void setup() {
  */
 
 optional<Instruction> next_instruction{etl::nullopt};
-
-typedef variant<SensorInstruction, SensorWaiting, SensorReady> SensorState;
-SensorState sensor_state{SensorReady{}};
 
 bool is_actuate_inflation() {
     auto config = flow_io.getConfig();
@@ -164,11 +172,8 @@ bool parse_release_command(const String &s) {
 }
 
 bool parse_sensor_command(const String &s) {
-    uint8_t sensorN;
-    sensorN = atoi(s.c_str());
-    if (sensorN > 0) {
-        sensor_state = SensorInstruction{sensorN = (uint8_t) sensorN};
-    }
+    sensor_state = sensor_ready;
+    sensor_sampling_mode = SensorSampling::Active;
     return true;
 }
 
@@ -203,9 +208,10 @@ bool parse_command(const String &data) {
             return parse_vacuum_command(command.substring(1));
         }
     } else if (command[0] == 'r') {
-        return parse_sensor_command(command.substring(1));
+        sensor_sampling_mode = Active;
+        return true;
     } else if (command[0] == 's') {
-        sensor_state = SensorReady{};
+        sensor_sampling_mode = Inactive;
         return true;
     } else {
         return false;
@@ -297,69 +303,72 @@ void handle_command(optional<String> &command) {
     command = etl::nullopt;
 }
 
-run_every mux_sensor_reading{1000l, []() {
-    if (sensor_state.is_type<SensorInstruction>()
-        && sensor_state.get<SensorInstruction>().sensor_n > 0
-        && sensor_state.get<SensorInstruction>().sensor_n <= 16) {
-        SensorInstruction instruction = sensor_state.get<SensorInstruction>();
-        uint8_t channel = instruction.sensor_n - 1;
-        digitalWrite(SENSOR_ENABLE_PIN, LOW);
-        digitalWrite(SENSOR_S0_PIN, bitRead(channel, 0));
-        digitalWrite(SENSOR_S1_PIN, bitRead(channel, 1));
-        digitalWrite(SENSOR_S2_PIN, bitRead(channel, 2));
-        digitalWrite(SENSOR_S3_PIN, bitRead(channel, 3));
-        delayMicroseconds(2);
-        analogRead(SENSOR_OUT_PIN); // Should discharge extra capacitiveness
-        delayMicroseconds(2);
-        uint32_t value = analogRead(SENSOR_OUT_PIN);
-        Serial.print("S");
-        Serial.print(instruction.sensor_n);
-        Serial.print(": ");
-        Serial.print(value);
-        Serial.println();
-    } else {
-        digitalWrite(SENSOR_ENABLE_PIN, HIGH);
+void start_sample_sensor(uint16_t channel) {
+    switch (channel) {
+        case 0:
+            ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_0, false);
+            return;
+        case 1:
+            ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_1, false);
+            return;
+        case 2:
+            ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_2, false);
+            return;
+        case 3:
+            ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_3, false);
+            return;
+        default:
+            return;
     }
-}};
+}
 
-run_every ads_reading{1l, []() {
-    if (sensor_state.is_type<SensorWaiting>()) {
+struct SensorReadingStates : public SensorState::reader {
+    void read(typename etl::parameter_type<SensorReady>::type value) override {}
+
+    void read(typename etl::parameter_type<SensorReadingRequest>::type value) override {
+        if (sensor_sampling_mode == Active) {
+            start_sample_sensor(0);
+            sensor_state = SensorWaiting{0, {-1, -1, -1, -1}};
+        }
+    }
+
+    void read(typename etl::parameter_type<SensorWaiting>::type waiting) override {
         if (ads.conversionComplete()) {
-            Serial.print("S");
-            auto &sensor_waiting = sensor_state.get<SensorWaiting>();
-            Serial.print(sensor_waiting.sensor_n);
-            Serial.print(" = ");
-            Serial.println(ads.getLastConversionResults());
-            Serial.print("delay: ");
-            Serial.print(millis() - sensor_waiting.start_time);
-            Serial.println("ms");
-            sensor_state = SensorReady();
+            int16_t results = ads.getLastConversionResults();
+            int16_t new_readings[4] = {waiting.previous_readings[0], waiting.previous_readings[1],
+                                       waiting.previous_readings[2], waiting.previous_readings[3]};
+            new_readings[waiting.sensor_n] = results;
+            if (waiting.sensor_n == 3) {
+                sensor_state = SensorReadDone{{new_readings[0], new_readings[1], new_readings[2], new_readings[3]}};
+            } else {
+                start_sample_sensor(waiting.sensor_n + 1);
+                sensor_state = SensorWaiting{static_cast<uint8_t>(waiting.sensor_n + 1),
+                                             {new_readings[0], new_readings[1], new_readings[2], new_readings[3]}};
+            }
         }
-    } else if (sensor_state.is_type<SensorInstruction>()) {
-        SensorInstruction instruction = sensor_state.get<SensorInstruction>();
-        switch (instruction.sensor_n) {
-            case 1:
-                ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_0, false);
-                sensor_state = SensorWaiting{instruction.sensor_n, millis()};
-                break;
-            case 2:
-                ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_1, false);
-                sensor_state = SensorWaiting{instruction.sensor_n, millis()};
-                break;
-            case 3:
-                ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_2, false);
-                sensor_state = SensorWaiting{instruction.sensor_n, millis()};
-                break;
-            case 4:
-                ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_3, false);
-                sensor_state = SensorWaiting{instruction.sensor_n, millis()};
-                break;
-            default:
-                sensor_state = SensorReady();
-                break;
-        }
-    } else if (sensor_state.is_type<SensorReady>()) {
-        // Do nothing
+    }
+
+    void read(typename etl::parameter_type<SensorReadDone>::type results) override {
+        Serial.print("Sensors: ");
+        Serial.print(results.values[0]);
+        Serial.print(", ");
+        Serial.print(results.values[1]);
+        Serial.print(", ");
+        Serial.print(results.values[2]);
+        Serial.print(", ");
+        Serial.print(results.values[3]);
+        Serial.println();
+    }
+} sensor_reading_states;
+
+void continuous_sensor_sampling() {
+    sensor_state.call(sensor_reading_states);
+}
+
+run_every sensor_sample{100l, []() {
+    if (sensor_sampling_mode == Active
+        && (sensor_state.is_type<SensorReady>() || sensor_state.is_type<SensorReadDone>())) {
+        sensor_state = SensorReadingRequest {};
     }
 }};
 
@@ -371,8 +380,8 @@ void loop() {
     if (command.has_value()) {
         handle_command(command);
     }
-//    mux_sensor_reading.update(time);
-    ads_reading.update(time);
+    sensor_sample.update(time);
+    continuous_sensor_sampling();
     flow_io.optimizePower(150, 200);
 }
 
