@@ -65,7 +65,7 @@ SensorState sensor_state{SensorReady{}};
 enum SensorSampling {
     Active,
     Inactive
-} sensor_sampling_mode;
+} sensor_sampling_mode = Inactive;
 
 Instruction STOP_ALL{'!', 0, 0b00011111};
 
@@ -169,12 +169,6 @@ bool parse_release_command(const String &s) {
     } else {
         return false;
     }
-}
-
-bool parse_sensor_command(const String &s) {
-    sensor_state = sensor_ready;
-    sensor_sampling_mode = SensorSampling::Active;
-    return true;
 }
 
 bool parse_command(const String &data) {
